@@ -1,0 +1,73 @@
+#include <cuda_runtime.h>
+#include <stdio.h>
+
+// Kernel for 2D Convolution
+__global__ void conv2D(float *input, float *kernel, float *output, int width, int height, int kSize) {
+    int tx = threadIdx.x + blockIdx.x * blockDim.x;
+    int ty = threadIdx.y + blockIdx.y * blockDim.y;
+
+    int radius = kSize / 2;
+
+    if (tx >= width || ty >= height) return;
+
+    float sum = 0.0;
+    for (int i = -radius; i <= radius; i++) {
+        for (int j = -radius; j <= radius; j++) {
+            int x = min(max(tx + i, 0), width - 1);
+            int y = min(max(ty + j, 0), height - 1);
+            sum += input[y * width + x] * kernel[(i + radius) * kSize + (j + radius)];
+        }
+    }
+    output[ty * width + tx] = sum;
+}
+
+int main() {
+    // Input and kernel size
+    const int width = 1024;
+    const int height = 1024;
+    const int kSize = 3;
+
+    // Host memory allocation
+    float *h_input = (float *)malloc(width * height * sizeof(float));
+    float *h_kernel = (float *)malloc(kSize * kSize * sizeof(float));
+    float *h_output = (float *)malloc(width * height * sizeof(float));
+
+    // Initialize input and kernel
+    for (int i = 0; i < width * height; i++) {
+        h_input[i] = 1.0f; // Example initialization
+    }
+    for (int i = 0; i < kSize * kSize; i++) {
+        h_kernel[i] = 1.0f / (kSize * kSize); // Example: Averaging filter
+    }
+
+    // Device memory allocation
+    float *d_input, *d_kernel, *d_output;
+    cudaMalloc((void **)&d_input, width * height * sizeof(float));
+    cudaMalloc((void **)&d_kernel, kSize * kSize * sizeof(float));
+    cudaMalloc((void **)&d_output, width * height * sizeof(float));
+
+    // Copy data from host to device
+    cudaMemcpy(d_input, h_input, width * height * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_kernel, h_kernel, kSize * kSize * sizeof(float), cudaMemcpyHostToDevice);
+
+    // Define grid and block dimensions
+    dim3 blockDim(16, 16);
+    dim3 gridDim((width + blockDim.x - 1) / blockDim.x, (height + blockDim.y - 1) / blockDim.y);
+
+    // Launch kernel
+    conv2D<<<gridDim, blockDim>>>(d_input, d_kernel, d_output, width, height, kSize);
+
+    // Copy result back to host
+    cudaMemcpy(h_output, d_output, width * height * sizeof(float), cudaMemcpyDeviceToHost);
+
+    // Free memory
+    cudaFree(d_input);
+    cudaFree(d_kernel);
+    cudaFree(d_output);
+    free(h_input);
+    free(h_kernel);
+    free(h_output);
+
+    printf("2D Convolution Completed\n");
+    return 0;
+}
