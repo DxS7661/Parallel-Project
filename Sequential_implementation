@@ -10,14 +10,20 @@
 #define POOL_SIZE 2
 #define NUM_EPOCHS 5
 #define TRAIN_SIZE 100
+#define TEST_SIZE 20
 #define FC1_SIZE 120
 #define FC2_SIZE 84
 #define CONV1_OUT 6
 #define CONV2_OUT 16
+#define LEARNING_RATE 0.01
 
 // Activation functions
 float relu(float x) {
     return x > 0 ? x : 0;
+}
+
+float relu_derivative(float x) {
+    return x > 0 ? 1 : 0;
 }
 
 void softmax(float *input, int size, float *output) {
@@ -93,10 +99,10 @@ void fully_connected(float *input, float *weights, float *biases, float *output,
 
 // Cross-entropy loss
 float cross_entropy_loss(float *predicted, int label) {
-    return -log(predicted[label]);
+    return -log(predicted[label] + 1e-9); // Add epsilon for numerical stability
 }
 
-// Main function for training
+// Training function
 void train() {
     // Simulated dataset
     float train_images[TRAIN_SIZE * INPUT_SIZE * INPUT_SIZE];
@@ -119,7 +125,6 @@ void train() {
     float fc2_biases[FC2_SIZE] = {0};
     float fc3_biases[NUM_CLASSES] = {0};
 
-    // Random initialization of weights
     for (int i = 0; i < sizeof(conv1_weights) / sizeof(float); i++) conv1_weights[i] = (float)rand() / RAND_MAX;
     for (int i = 0; i < sizeof(conv2_weights) / sizeof(float); i++) conv2_weights[i] = (float)rand() / RAND_MAX;
     for (int i = 0; i < sizeof(fc1_weights) / sizeof(float); i++) fc1_weights[i] = (float)rand() / RAND_MAX;
