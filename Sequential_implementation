@@ -1,0 +1,169 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <math.h>
+#include <string.h>
+
+// Define constants
+#define INPUT_SIZE 32
+#define NUM_CLASSES 10
+#define KERNEL_SIZE 5
+#define POOL_SIZE 2
+#define NUM_EPOCHS 5
+#define TRAIN_SIZE 100
+#define FC1_SIZE 120
+#define FC2_SIZE 84
+#define CONV1_OUT 6
+#define CONV2_OUT 16
+
+// Activation functions
+float relu(float x) {
+    return x > 0 ? x : 0;
+}
+
+void softmax(float *input, int size, float *output) {
+    float max = input[0];
+    for (int i = 1; i < size; i++) {
+        if (input[i] > max) max = input[i];
+    }
+
+    float sum = 0.0;
+    for (int i = 0; i < size; i++) {
+        output[i] = exp(input[i] - max);
+        sum += output[i];
+    }
+
+    for (int i = 0; i < size; i++) {
+        output[i] /= sum;
+    }
+}
+
+// Forward pass for convolution
+void conv2d(float *input, float *kernel, float *output, int input_size, int kernel_size, int output_channels, int input_channels) {
+    int output_size = input_size - kernel_size + 1;
+    for (int oc = 0; oc < output_channels; oc++) {
+        for (int i = 0; i < output_size; i++) {
+            for (int j = 0; j < output_size; j++) {
+                float sum = 0.0;
+                for (int ic = 0; ic < input_channels; ic++) {
+                    for (int ki = 0; ki < kernel_size; ki++) {
+                        for (int kj = 0; kj < kernel_size; kj++) {
+                            int row = i + ki;
+                            int col = j + kj;
+                            sum += input[(ic * input_size + row) * input_size + col] * kernel[(oc * input_channels + ic) * kernel_size * kernel_size + ki * kernel_size + kj];
+                        }
+                    }
+                }
+                output[(oc * output_size + i) * output_size + j] = relu(sum);
+            }
+        }
+    }
+}
+
+// Pooling forward
+void max_pooling(float *input, float *output, int input_size, int pool_size, int channels) {
+    int output_size = input_size / pool_size;
+    for (int c = 0; c < channels; c++) {
+        for (int i = 0; i < output_size; i++) {
+            for (int j = 0; j < output_size; j++) {
+                float max_val = -INFINITY;
+                for (int pi = 0; pi < pool_size; pi++) {
+                    for (int pj = 0; pj < pool_size; pj++) {
+                        int row = i * pool_size + pi;
+                        int col = j * pool_size + pj;
+                        float val = input[(c * input_size + row) * input_size + col];
+                        if (val > max_val) max_val = val;
+                    }
+                }
+                output[(c * output_size + i) * output_size + j] = max_val;
+            }
+        }
+    }
+}
+
+// Fully connected layer forward
+void fully_connected(float *input, float *weights, float *biases, float *output, int input_size, int output_size) {
+    for (int i = 0; i < output_size; i++) {
+        float sum = 0.0;
+        for (int j = 0; j < input_size; j++) {
+            sum += input[j] * weights[i * input_size + j];
+        }
+        output[i] = relu(sum + biases[i]);
+    }
+}
+
+// Cross-entropy loss
+float cross_entropy_loss(float *predicted, int label) {
+    return -log(predicted[label]);
+}
+
+// Main function for training
+void train() {
+    // Simulated dataset
+    float train_images[TRAIN_SIZE * INPUT_SIZE * INPUT_SIZE];
+    int train_labels[TRAIN_SIZE];
+    for (int i = 0; i < TRAIN_SIZE * INPUT_SIZE * INPUT_SIZE; i++) {
+        train_images[i] = (float)rand() / RAND_MAX;
+    }
+    for (int i = 0; i < TRAIN_SIZE; i++) {
+        train_labels[i] = rand() % NUM_CLASSES;
+    }
+
+    // Initialize weights and biases
+    float conv1_weights[CONV1_OUT * 1 * KERNEL_SIZE * KERNEL_SIZE];
+    float conv2_weights[CONV2_OUT * CONV1_OUT * KERNEL_SIZE * KERNEL_SIZE];
+    float fc1_weights[FC1_SIZE * (CONV2_OUT * 5 * 5)];
+    float fc2_weights[FC2_SIZE * FC1_SIZE];
+    float fc3_weights[NUM_CLASSES * FC2_SIZE];
+
+    float fc1_biases[FC1_SIZE] = {0};
+    float fc2_biases[FC2_SIZE] = {0};
+    float fc3_biases[NUM_CLASSES] = {0};
+
+    // Random initialization of weights
+    for (int i = 0; i < sizeof(conv1_weights) / sizeof(float); i++) conv1_weights[i] = (float)rand() / RAND_MAX;
+    for (int i = 0; i < sizeof(conv2_weights) / sizeof(float); i++) conv2_weights[i] = (float)rand() / RAND_MAX;
+    for (int i = 0; i < sizeof(fc1_weights) / sizeof(float); i++) fc1_weights[i] = (float)rand() / RAND_MAX;
+    for (int i = 0; i < sizeof(fc2_weights) / sizeof(float); i++) fc2_weights[i] = (float)rand() / RAND_MAX;
+    for (int i = 0; i < sizeof(fc3_weights) / sizeof(float); i++) fc3_weights[i] = (float)rand() / RAND_MAX;
+
+    for (int epoch = 0; epoch < NUM_EPOCHS; epoch++) {
+        float total_loss = 0.0;
+
+        for (int i = 0; i < TRAIN_SIZE; i++) {
+            // Get one sample
+            float *input = &train_images[i * INPUT_SIZE * INPUT_SIZE];
+            int label = train_labels[i];
+
+            // Forward pass
+            float conv1_output[CONV1_OUT * 28 * 28];
+            float pool1_output[CONV1_OUT * 14 * 14];
+            float conv2_output[CONV2_OUT * 10 * 10];
+            float pool2_output[CONV2_OUT * 5 * 5];
+
+            conv2d(input, conv1_weights, conv1_output, INPUT_SIZE, KERNEL_SIZE, CONV1_OUT, 1);
+            max_pooling(conv1_output, pool1_output, 28, POOL_SIZE, CONV1_OUT);
+            conv2d(pool1_output, conv2_weights, conv2_output, 14, KERNEL_SIZE, CONV2_OUT, CONV1_OUT);
+            max_pooling(conv2_output, pool2_output, 10, POOL_SIZE, CONV2_OUT);
+
+            float fc1_output[FC1_SIZE];
+            float fc2_output[FC2_SIZE];
+            float fc3_output[NUM_CLASSES];
+            float probabilities[NUM_CLASSES];
+
+            fully_connected(pool2_output, fc1_weights, fc1_biases, fc1_output, CONV2_OUT * 5 * 5, FC1_SIZE);
+            fully_connected(fc1_output, fc2_weights, fc2_biases, fc2_output, FC1_SIZE, FC2_SIZE);
+            fully_connected(fc2_output, fc3_weights, fc3_biases, fc3_output, FC2_SIZE, NUM_CLASSES);
+            softmax(fc3_output, NUM_CLASSES, probabilities);
+
+            // Compute loss
+            total_loss += cross_entropy_loss(probabilities, label);
+        }
+
+        printf("Epoch %d: Loss = %.4f\n", epoch + 1, total_loss / TRAIN_SIZE);
+    }
+}
+
+int main() {
+    train();
+    return 0;
+}
