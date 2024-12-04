@@ -1,73 +1,265 @@
-#include <cuda_runtime.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <math.h>
+#include <cuda_runtime.h>
 
-// Kernel for 2D Convolution
-__global__ void conv2D(float *input, float *kernel, float *output, int width, int height, int kSize) {
-    int tx = threadIdx.x + blockIdx.x * blockDim.x;
-    int ty = threadIdx.y + blockIdx.y * blockDim.y;
+#define INPUT_SIZE 32
+#define C1_FILTERS 6
+#define C1_KERNEL_SIZE 5
+#define S2_POOL_SIZE 2
+#define C3_FILTERS 16
+#define C3_KERNEL_SIZE 5
+#define S4_POOL_SIZE 2
+#define C5_UNITS 120
+#define F6_UNITS 84
+#define OUTPUT_UNITS 10
+#define LEARNING_RATE 0.01
+#define EPOCHS 10
+#define BATCH_SIZE 32
+#define MNIST_IMAGE_SIZE 28
 
-    int radius = kSize / 2;
+#define BLOCK_SIZE 16
 
-    if (tx >= width || ty >= height) return;
-
-    float sum = 0.0;
-    for (int i = -radius; i <= radius; i++) {
-        for (int j = -radius; j <= radius; j++) {
-            int x = min(max(tx + i, 0), width - 1);
-            int y = min(max(ty + j, 0), height - 1);
-            sum += input[y * width + x] * kernel[(i + radius) * kSize + (j + radius)];
-        }
-    }
-    output[ty * width + tx] = sum;
+// Sigmoid activation function
+__device__ float sigmoid(float x) {
+    return 1.0f / (1.0f + expf(-x));
 }
 
+// Sigmoid derivative for backpropagation
+__device__ float sigmoid_derivative(float x) {
+    return x * (1.0f - x);
+}
+
+// Softmax activation function for final output layer
+__device__ void softmax(float* input, float* output, int size) {
+    float sum = 0.0f;
+    for (int i = 0; i < size; i++) {
+        output[i] = expf(input[i]);
+        sum += output[i];
+    }
+    for (int i = 0; i < size; i++) {
+        output[i] /= sum;
+    }
+}
+
+// Convolution operation kernel (with valid padding)
+__global__ void convolution2d(float* input, float* output, float* filters, int input_size, int filter_size, int num_filters) {
+    int output_size = input_size - filter_size + 1;
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    
+    if (tid < num_filters * output_size * output_size) {
+        int f = tid / (output_size * output_size);
+        int idx = tid % (output_size * output_size);
+        int i = idx / output_size;
+        int j = idx % output_size;
+
+        float sum = 0.0f;
+        for (int k = 0; k < filter_size; k++) {
+            for (int l = 0; l < filter_size; l++) {
+                sum += input[(i + k) * input_size + (j + l)] * filters[f * filter_size * filter_size + k * filter_size + l];
+            }
+        }
+        output[tid] = sigmoid(sum);
+    }
+}
+
+// Average Pooling kernel
+__global__ void average_pooling(float* input, float* output, int input_size, int pool_size) {
+    int output_size = input_size / pool_size;
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    
+    if (tid < output_size * output_size) {
+        int i = tid / output_size;
+        int j = tid % output_size;
+        
+        float sum = 0.0f;
+        for (int k = 0; k < pool_size; k++) {
+            for (int l = 0; l < pool_size; l++) {
+                sum += input[(i * pool_size + k) * input_size + (j * pool_size + l)];
+            }
+        }
+        output[tid] = sum / (pool_size * pool_size);
+    }
+}
+
+// Fully Connected Layer kernel (Matrix-Vector multiplication)
+__global__ void fully_connected(float* input, float* output, float* weights, float* biases, int input_size, int output_size) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    
+    if (tid < output_size) {
+        float sum = biases[tid];
+        for (int i = 0; i < input_size; i++) {
+            sum += input[i] * weights[tid * input_size + i];
+        }
+        output[tid] = sigmoid(sum);
+    }
+}
+
+// Weight update for fully connected layers (Gradient Descent)
+__global__ void update_weights(float* weights, float* gradients, float* biases, float* bias_gradients, int input_size, int output_size, float learning_rate) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    
+    if (tid < output_size) {
+        for (int i = 0; i < input_size; i++) {
+            weights[tid * input_size + i] -= learning_rate * gradients[tid * input_size + i];
+        }
+        biases[tid] -= learning_rate * bias_gradients[tid];
+    }
+}
+
+// Initialize weights with small random values
+void initialize_weights(float* weights, int size) {
+    for (int i = 0; i < size; i++) {
+        weights[i] = ((float)rand() / RAND_MAX) * 0.01;  // small random values
+    }
+}
+
+// Load MNIST image data (binary format)
+void load_mnist_images(const char* filename, uint8_t* images, int num_images) {
+    FILE* file = fopen(filename, "rb");
+    if (file == NULL) {
+        fprintf(stderr, "Error opening file: %s\n", filename);
+        exit(1);
+    }
+
+    fseek(file, 16, SEEK_SET);  // Skip the header
+    for (int i = 0; i < num_images; i++) {
+        for (int j = 0; j < MNIST_IMAGE_SIZE * MNIST_IMAGE_SIZE; j++) {
+            images[i * MNIST_IMAGE_SIZE * MNIST_IMAGE_SIZE + j] = fgetc(file);  // Read image data
+        }
+    }
+
+    fclose(file);
+}
+
+// Load MNIST label data (binary format)
+void load_mnist_labels(const char* filename, uint8_t* labels, int num_labels) {
+    FILE* file = fopen(filename, "rb");
+    if (file == NULL) {
+        fprintf(stderr, "Error opening file: %s\n", filename);
+        exit(1);
+    }
+
+    fseek(file, 8, SEEK_SET);  // Skip the header
+    for (int i = 0; i < num_labels; i++) {
+        labels[i] = fgetc(file);  // Read label data
+    }
+
+    fclose(file);
+}
+
+// Main function to train the network
 int main() {
-    // Input and kernel size
-    const int width = 1024;
-    const int height = 1024;
-    const int kSize = 3;
+    // Load dataset
+    uint8_t images[60000 * MNIST_IMAGE_SIZE * MNIST_IMAGE_SIZE];
+    uint8_t labels[60000];
+    
+    load_mnist_images("train-images.idx3-ubyte", images, 60000);
+    load_mnist_labels("train-labels.idx1-ubyte", labels, 60000);
+    
+    printf("Training LeNet-5 on MNIST dataset...\n");
 
-    // Host memory allocation
-    float *h_input = (float *)malloc(width * height * sizeof(float));
-    float *h_kernel = (float *)malloc(kSize * kSize * sizeof(float));
-    float *h_output = (float *)malloc(width * height * sizeof(float));
+    // Initialize model parameters
+    float c1_filters[C1_FILTERS * C1_KERNEL_SIZE * C1_KERNEL_SIZE];
+    float c3_filters[C3_FILTERS * C3_KERNEL_SIZE * C3_KERNEL_SIZE];
+    float c5_weights[C3_FILTERS * 5 * 5 * C5_UNITS];
+    float f6_weights[C5_UNITS * F6_UNITS];
+    float output_weights[F6_UNITS * OUTPUT_UNITS];
+    float c1_biases[C1_FILTERS];
+    float c3_biases[C3_FILTERS];
+    float c5_biases[C5_UNITS];
+    float f6_biases[F6_UNITS];
+    float output_biases[OUTPUT_UNITS];
 
-    // Initialize input and kernel
-    for (int i = 0; i < width * height; i++) {
-        h_input[i] = 1.0f; // Example initialization
+    initialize_weights(c1_filters, C1_FILTERS * C1_KERNEL_SIZE * C1_KERNEL_SIZE);
+    initialize_weights(c3_filters, C3_FILTERS * C3_KERNEL_SIZE * C3_KERNEL_SIZE);
+    initialize_weights(c5_weights, C3_FILTERS * 5 * 5 * C5_UNITS);
+    initialize_weights(f6_weights, C5_UNITS * F6_UNITS);
+    initialize_weights(output_weights, F6_UNITS * OUTPUT_UNITS);
+
+    // Device memory
+    float *d_input, *d_target, *d_c1_filters, *d_c3_filters, *d_c5_weights, *d_f6_weights, *d_output_weights;
+    float *d_c1_output, *d_s2_output, *d_c3_output, *d_s4_output, *d_c5_output, *d_f6_output, *d_final_output;
+    float *d_c1_biases, *d_c3_biases, *d_c5_biases, *d_f6_biases, *d_output_biases;
+    
+    cudaMalloc(&d_input, sizeof(float) * INPUT_SIZE * INPUT_SIZE);
+    cudaMalloc(&d_target, sizeof(float) * OUTPUT_UNITS);
+    cudaMalloc(&d_c1_filters, sizeof(float) * C1_FILTERS * C1_KERNEL_SIZE * C1_KERNEL_SIZE);
+    cudaMalloc(&d_c3_filters, sizeof(float) * C3_FILTERS * C3_KERNEL_SIZE * C3_KERNEL_SIZE);
+    cudaMalloc(&d_c5_weights, sizeof(float) * C3_FILTERS * 5 * 5 * C5_UNITS);
+    cudaMalloc(&d_f6_weights, sizeof(float) * C5_UNITS * F6_UNITS);
+    cudaMalloc(&d_output_weights, sizeof(float) * F6_UNITS * OUTPUT_UNITS);
+
+    cudaMalloc(&d_c1_output, sizeof(float) * C1_FILTERS * (INPUT_SIZE - C1_KERNEL_SIZE + 1) * (INPUT_SIZE - C1_KERNEL_SIZE + 1));
+    cudaMalloc(&d_s2_output, sizeof(float) * C1_FILTERS * (INPUT_SIZE / 2) * (INPUT_SIZE / 2));
+    cudaMalloc(&d_c3_output, sizeof(float) * C3_FILTERS * (INPUT_SIZE / 2 - C3_KERNEL_SIZE + 1) * (INPUT_SIZE / 2 - C3_KERNEL_SIZE + 1));
+    cudaMalloc(&d_s4_output, sizeof(float) * C3_FILTERS * (INPUT_SIZE / 4) * (INPUT_SIZE / 4));
+    cudaMalloc(&d_c5_output, sizeof(float) * C5_UNITS);
+    cudaMalloc(&d_f6_output, sizeof(float) * F6_UNITS);
+    cudaMalloc(&d_final_output, sizeof(float) * OUTPUT_UNITS);
+
+    cudaMalloc(&d_c1_biases, sizeof(float) * C1_FILTERS);
+    cudaMalloc(&d_c3_biases, sizeof(float) * C3_FILTERS);
+    cudaMalloc(&d_c5_biases, sizeof(float) * C5_UNITS);
+    cudaMalloc(&d_f6_biases, sizeof(float) * F6_UNITS);
+    cudaMalloc(&d_output_biases, sizeof(float) * OUTPUT_UNITS);
+
+    cudaMemcpy(d_c1_filters, c1_filters, sizeof(float) * C1_FILTERS * C1_KERNEL_SIZE * C1_KERNEL_SIZE, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_c3_filters, c3_filters, sizeof(float) * C3_FILTERS * C3_KERNEL_SIZE * C3_KERNEL_SIZE, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_c5_weights, c5_weights, sizeof(float) * C3_FILTERS * 5 * 5 * C5_UNITS, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_f6_weights, f6_weights, sizeof(float) * C5_UNITS * F6_UNITS, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_output_weights, output_weights, sizeof(float) * F6_UNITS * OUTPUT_UNITS, cudaMemcpyHostToDevice);
+    
+    // Training loop
+    for (int epoch = 0; epoch < EPOCHS; epoch++) {
+        for (int i = 0; i < 60000 / BATCH_SIZE; i++) {
+            // Load batch data (assuming you have a batch loading function)
+            float* h_input = ...;  // Load batch of input images
+            float* h_target = ...; // Load batch of target labels
+
+            // Copy data to device
+            cudaMemcpy(d_input, h_input, sizeof(float) * INPUT_SIZE * INPUT_SIZE, cudaMemcpyHostToDevice);
+            cudaMemcpy(d_target, h_target, sizeof(float) * OUTPUT_UNITS, cudaMemcpyHostToDevice);
+
+            // Forward pass
+            convolution2d<<<(C1_FILTERS * (INPUT_SIZE - C1_KERNEL_SIZE + 1) * (INPUT_SIZE - C1_KERNEL_SIZE + 1) + BLOCK_SIZE - 1) / BLOCK_SIZE, BLOCK_SIZE>>>
+                (d_input, d_c1_output, d_c1_filters, INPUT_SIZE, C1_KERNEL_SIZE, C1_FILTERS);
+            
+            average_pooling<<<(C1_FILTERS * (INPUT_SIZE / 2 - C1_KERNEL_SIZE / 2) * (INPUT_SIZE / 2 - C1_KERNEL_SIZE / 2) + BLOCK_SIZE - 1) / BLOCK_SIZE, BLOCK_SIZE>>>
+                (d_c1_output, d_s2_output, INPUT_SIZE - C1_KERNEL_SIZE + 1, S2_POOL_SIZE);
+            
+            // Continue forward pass through other layers...
+            
+            // Copy final output back to host
+            float final_output[OUTPUT_UNITS];
+            cudaMemcpy(final_output, d_final_output, sizeof(float) * OUTPUT_UNITS, cudaMemcpyDeviceToHost);
+
+            // Loss computation and backward pass...
+
+            // Update weights...
+        }
     }
-    for (int i = 0; i < kSize * kSize; i++) {
-        h_kernel[i] = 1.0f / (kSize * kSize); // Example: Averaging filter
-    }
 
-    // Device memory allocation
-    float *d_input, *d_kernel, *d_output;
-    cudaMalloc((void **)&d_input, width * height * sizeof(float));
-    cudaMalloc((void **)&d_kernel, kSize * kSize * sizeof(float));
-    cudaMalloc((void **)&d_output, width * height * sizeof(float));
-
-    // Copy data from host to device
-    cudaMemcpy(d_input, h_input, width * height * sizeof(float), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_kernel, h_kernel, kSize * kSize * sizeof(float), cudaMemcpyHostToDevice);
-
-    // Define grid and block dimensions
-    dim3 blockDim(16, 16);
-    dim3 gridDim((width + blockDim.x - 1) / blockDim.x, (height + blockDim.y - 1) / blockDim.y);
-
-    // Launch kernel
-    conv2D<<<gridDim, blockDim>>>(d_input, d_kernel, d_output, width, height, kSize);
-
-    // Copy result back to host
-    cudaMemcpy(h_output, d_output, width * height * sizeof(float), cudaMemcpyDeviceToHost);
-
-    // Free memory
+    // Free memory on the device
     cudaFree(d_input);
-    cudaFree(d_kernel);
-    cudaFree(d_output);
-    free(h_input);
-    free(h_kernel);
-    free(h_output);
+    cudaFree(d_target);
+    cudaFree(d_c1_filters);
+    cudaFree(d_c3_filters);
+    cudaFree(d_c5_weights);
+    cudaFree(d_f6_weights);
+    cudaFree(d_output_weights);
+    cudaFree(d_c1_output);
+    cudaFree(d_s2_output);
+    cudaFree(d_c3_output);
+    cudaFree(d_s4_output);
+    cudaFree(d_c5_output);
+    cudaFree(d_f6_output);
+    cudaFree(d_final_output);
+    cudaFree(d_c1_biases);
+    cudaFree(d_c3_biases);
+    cudaFree(d_c5_biases);
+    cudaFree(d_f6_biases);
+    cudaFree(d_output_biases);
 
-    printf("2D Convolution Completed\n");
     return 0;
 }
