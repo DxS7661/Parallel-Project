@@ -1,89 +1,281 @@
-#include <mpi.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <math.h>
+#include <stdint.h>
+#include <string.h>
+#include <mpi.h>
 
-// Function to perform 2D convolution
-void conv2D(float *input, float *kernel, float *output, int width, int height, int kSize, int startRow, int endRow) {
-    int radius = kSize / 2;
-    for (int i = startRow; i < endRow; i++) {
-        for (int j = 0; j < width; j++) {
-            float sum = 0.0;
-            for (int ki = -radius; ki <= radius; ki++) {
-                for (int kj = -radius; kj <= radius; kj++) {
-                    int x = i + ki;
-                    int y = j + kj;
-                    if (x >= 0 && x < height && y >= 0 && y < width) {
-                        sum += input[x * width + y] * kernel[(ki + radius) * kSize + (kj + radius)];
+#define INPUT_SIZE 32
+#define C1_FILTERS 6
+#define C1_KERNEL_SIZE 5
+#define S2_POOL_SIZE 2
+#define C3_FILTERS 16
+#define C3_KERNEL_SIZE 5
+#define S4_POOL_SIZE 2
+#define C5_UNITS 120
+#define F6_UNITS 84
+#define OUTPUT_UNITS 10
+#define LEARNING_RATE 0.01
+#define EPOCHS 10
+#define BATCH_SIZE 32
+#define MNIST_IMAGE_SIZE 28
+
+// Activation function: Sigmoid
+float sigmoid(float x) {
+    return 1.0 / (1.0 + exp(-x));
+}
+
+// Sigmoid derivative (for backpropagation)
+float sigmoid_derivative(float x) {
+    return x * (1.0 - x);
+}
+
+// Softmax function (for output layer)
+void softmax(float* input, float* output, int size) {
+    float sum = 0.0;
+    for (int i = 0; i < size; i++) {
+        output[i] = exp(input[i]);
+        sum += output[i];
+    }
+    for (int i = 0; i < size; i++) {
+        output[i] /= sum;
+    }
+}
+
+// Convolution operation (with valid padding)
+void convolution2d(float* input, float* output, float* filters, int input_size, int num_filters, int kernel_size) {
+    int output_size = input_size - kernel_size + 1;
+    for (int f = 0; f < num_filters; f++) {
+        for (int i = 0; i < output_size; i++) {
+            for (int j = 0; j < output_size; j++) {
+                float sum = 0.0;
+                for (int k = 0; k < kernel_size; k++) {
+                    for (int l = 0; l < kernel_size; l++) {
+                        sum += input[(i + k) * input_size + (j + l)] * filters[f * kernel_size * kernel_size + k * kernel_size + l];
                     }
                 }
+                output[f * output_size * output_size + i * output_size + j] = sigmoid(sum);
             }
-            output[i * width + j] = sum;
         }
     }
 }
 
-int main(int argc, char *argv[]) {
-    int rank, size;
-    MPI_Init(&argc, &argv);
-    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
-    MPI_Comm_size(MPI_COMM_WORLD, &size);
+// Average Pooling operation
+void average_pooling(float* input, float* output, int input_size, int pool_size) {
+    int output_size = input_size / pool_size;
+    for (int i = 0; i < output_size; i++) {
+        for (int j = 0; j < output_size; j++) {
+            float sum = 0.0;
+            for (int k = 0; k < pool_size; k++) {
+                for (int l = 0; l < pool_size; l++) {
+                    sum += input[(i * pool_size + k) * input_size + (j * pool_size + l)];
+                }
+            }
+            output[i * output_size + j] = sum / (pool_size * pool_size);
+        }
+    }
+}
 
-    const int width = 1024;
-    const int height = 1024;
-    const int kSize = 3;
+// Fully Connected Layer (Matrix-Vector multiplication)
+void fully_connected(float* input, float* output, float* weights, float* biases, int input_size, int output_size) {
+    for (int i = 0; i < output_size; i++) {
+        output[i] = biases[i];
+        for (int j = 0; j < input_size; j++) {
+            output[i] += input[j] * weights[i * input_size + j];
+        }
+        output[i] = sigmoid(output[i]);
+    }
+}
 
-    float *input = NULL;
-    float *kernel = (float *)malloc(kSize * kSize * sizeof(float));
-    float *output = NULL;
+// Weight initialization function
+void initialize_weights(float* weights, int size) {
+    for (int i = 0; i < size; i++) {
+        weights[i] = ((float)rand() / RAND_MAX) * 0.01;  // small random values
+    }
+}
 
-    // Initialize kernel (e.g., averaging filter)
-    for (int i = 0; i < kSize * kSize; i++) {
-        kernel[i] = 1.0f / (kSize * kSize);
+// Loss function: Cross-Entropy Loss
+float cross_entropy_loss(float* output, float* target, int size) {
+    float loss = 0.0;
+    for (int i = 0; i < size; i++) {
+        loss -= target[i] * log(output[i]);
+    }
+    return loss;
+}
+
+// Backpropagation
+void backpropagate(float* input, float* target, float* c1_filters, float* c3_filters, float* c5_weights, float* f6_weights, float* output_weights, 
+                   float* c1_output, float* s2_output, float* c3_output, float* s4_output, float* c5_output, float* f6_output, float* final_output) {
+    // Apply softmax to final output
+    float softmax_output[OUTPUT_UNITS];
+    softmax(final_output, softmax_output, OUTPUT_UNITS);
+    
+    // Calculate error (cross-entropy loss)
+    float loss = cross_entropy_loss(softmax_output, target, OUTPUT_UNITS);
+    printf("Loss: %f\n", loss);
+    
+    // Backpropagation: Calculate gradients and update weights (simplified)
+    
+    // Output layer gradients
+    float output_gradients[OUTPUT_UNITS];
+    for (int i = 0; i < OUTPUT_UNITS; i++) {
+        output_gradients[i] = softmax_output[i] - target[i];
     }
 
-    int rowsPerProcess = height / size;
-    int extraRows = height % size;
-
-    int startRow = rank * rowsPerProcess;
-    int endRow = startRow + rowsPerProcess;
-    if (rank == size - 1) {
-        endRow += extraRows;
-    }
-
-    int localRows = endRow - startRow;
-
-    float *localInput = (float *)malloc(localRows * width * sizeof(float));
-    float *localOutput = (float *)malloc(localRows * width * sizeof(float));
-
-    if (rank == 0) {
-        input = (float *)malloc(height * width * sizeof(float));
-        output = (float *)malloc(height * width * sizeof(float));
-
-        // Initialize input with dummy data
-        for (int i = 0; i < height * width; i++) {
-            input[i] = 1.0f;
+    // Update output weights (F6 to output layer)
+    for (int i = 0; i < F6_UNITS; i++) {
+        for (int j = 0; j < OUTPUT_UNITS; j++) {
+            output_weights[i * OUTPUT_UNITS + j] -= LEARNING_RATE * output_gradients[j] * f6_output[i];
         }
     }
 
-    // Scatter input data to all processes
-    MPI_Scatter(input, localRows * width, MPI_FLOAT, localInput, localRows * width, MPI_FLOAT, 0, MPI_COMM_WORLD);
-
-    // Perform local convolution
-    conv2D(localInput, kernel, localOutput, width, height, kSize, 0, localRows);
-
-    // Gather results from all processes
-    MPI_Gather(localOutput, localRows * width, MPI_FLOAT, output, localRows * width, MPI_FLOAT, 0, MPI_COMM_WORLD);
-
-    if (rank == 0) {
-        printf("2D Convolution Completed using MPI\n");
-        free(input);
-        free(output);
+    // Update F6 weights
+    for (int i = 0; i < C5_UNITS; i++) {
+        for (int j = 0; j < F6_UNITS; j++) {
+            f6_weights[i * F6_UNITS + j] -= LEARNING_RATE * output_gradients[j] * c5_output[i];
+        }
     }
 
-    free(kernel);
-    free(localInput);
-    free(localOutput);
+    // Update C5 weights
+    for (int i = 0; i < C3_FILTERS * 5 * 5; i++) {
+        for (int j = 0; j < C5_UNITS; j++) {
+            c5_weights[i * C5_UNITS + j] -= LEARNING_RATE * output_gradients[j] * s4_output[i];
+        }
+    }
+}
 
+// Function to load MNIST images and labels (simplified)
+void load_mnist_images(const char* filename, uint8_t* images, int num_images) {
+    FILE* file = fopen(filename, "rb");
+    if (file == NULL) {
+        fprintf(stderr, "Error opening file: %s\n", filename);
+        exit(1);
+    }
+
+    fseek(file, 16, SEEK_SET);  // Skip the header
+    for (int i = 0; i < num_images; i++) {
+        for (int j = 0; j < MNIST_IMAGE_SIZE * MNIST_IMAGE_SIZE; j++) {
+            images[i * MNIST_IMAGE_SIZE * MNIST_IMAGE_SIZE + j] = fgetc(file);  // Read image data
+        }
+    }
+
+    fclose(file);
+}
+
+void load_mnist_labels(const char* filename, uint8_t* labels, int num_labels) {
+    FILE* file = fopen(filename, "rb");
+    if (file == NULL) {
+        fprintf(stderr, "Error opening file: %s\n", filename);
+        exit(1);
+    }
+
+    fseek(file, 8, SEEK_SET);  // Skip the header
+    for (int i = 0; i < num_labels; i++) {
+        labels[i] = fgetc(file);  // Read label data
+    }
+
+    fclose(file);
+}
+
+// Training function
+void train(float* input, float* target, float* c1_filters, float* c3_filters, float* c5_weights, float* f6_weights, float* output_weights, 
+           float* c1_output, float* s2_output, float* c3_output, float* s4_output, float* c5_output, float* f6_output, float* final_output) {
+    // Forward pass
+    convolution2d(input, c1_output, c1_filters, INPUT_SIZE, C1_FILTERS, C1_KERNEL_SIZE);
+    average_pooling(c1_output, s2_output, INPUT_SIZE - C1_KERNEL_SIZE + 1, S2_POOL_SIZE);
+    convolution2d(s2_output, c3_output, c3_filters, INPUT_SIZE / 2, C3_FILTERS, C3_KERNEL_SIZE);
+    average_pooling(c3_output, s4_output, INPUT_SIZE / 2 - C3_KERNEL_SIZE + 1, S4_POOL_SIZE);
+    fully_connected(s4_output, c5_output, c5_weights, NULL, C3_FILTERS * 5 * 5, C5_UNITS);
+    fully_connected(c5_output, f6_output, f6_weights, NULL, C5_UNITS, F6_UNITS);
+    fully_connected(f6_output, final_output, output_weights, NULL, F6_UNITS, OUTPUT_UNITS);
+    
+    // Backpropagation and weight update
+    backpropagate(input, target, c1_filters, c3_filters, c5_weights, f6_weights, output_weights, 
+                  c1_output, s2_output, c3_output, s4_output, c5_output, f6_output, final_output);
+}
+
+// Main function
+int main(int argc, char* argv[]) {
+    // Initialize MPI
+    MPI_Init(&argc, &argv);
+    
+    // Get rank and size
+    int rank, size;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+
+    // Load dataset
+    uint8_t images[60000 * MNIST_IMAGE_SIZE * MNIST_IMAGE_SIZE];
+    uint8_t labels[60000];
+    
+    if (rank == 0) {
+        load_mnist_images("train-images.idx3-ubyte", images, 60000);
+        load_mnist_labels("train-labels.idx1-ubyte", labels, 60000);
+    }
+    
+    // Distribute the data among processes
+    int local_batch_size = 60000 / size;  // Divide the data into batches for each process
+    uint8_t local_images[local_batch_size * MNIST_IMAGE_SIZE * MNIST_IMAGE_SIZE];
+    uint8_t local_labels[local_batch_size];
+    
+    MPI_Scatter(images, local_batch_size * MNIST_IMAGE_SIZE * MNIST_IMAGE_SIZE, MPI_UINT8_T, local_images, 
+                local_batch_size * MNIST_IMAGE_SIZE * MNIST_IMAGE_SIZE, MPI_UINT8_T, 0, MPI_COMM_WORLD);
+    MPI_Scatter(labels, local_batch_size, MPI_UINT8_T, local_labels, local_batch_size, MPI_UINT8_T, 0, MPI_COMM_WORLD);
+    
+    printf("Rank %d: Training LeNet-5 on MNIST dataset...\n", rank);
+
+    // Initialize model parameters
+    float c1_filters[C1_FILTERS * C1_KERNEL_SIZE * C1_KERNEL_SIZE];
+    float c3_filters[C3_FILTERS * C3_KERNEL_SIZE * C3_KERNEL_SIZE];
+    float c5_weights[C3_FILTERS * 5 * 5 * C5_UNITS];
+    float f6_weights[C5_UNITS * F6_UNITS];
+    float output_weights[F6_UNITS * OUTPUT_UNITS];
+
+    initialize_weights(c1_filters, C1_FILTERS * C1_KERNEL_SIZE * C1_KERNEL_SIZE);
+    initialize_weights(c3_filters, C3_FILTERS * C3_KERNEL_SIZE * C3_KERNEL_SIZE);
+    initialize_weights(c5_weights, C3_FILTERS * 5 * 5 * C5_UNITS);
+    initialize_weights(f6_weights, C5_UNITS * F6_UNITS);
+    initialize_weights(output_weights, F6_UNITS * OUTPUT_UNITS);
+    
+    // Allocate memory for activations
+    float c1_output[C1_FILTERS * (INPUT_SIZE - C1_KERNEL_SIZE + 1) * (INPUT_SIZE - C1_KERNEL_SIZE + 1)];
+    float s2_output[C1_FILTERS * (INPUT_SIZE / 2 - C1_KERNEL_SIZE / 2) * (INPUT_SIZE / 2 - C1_KERNEL_SIZE / 2)];
+    float c3_output[C3_FILTERS * (INPUT_SIZE / 2 - C3_KERNEL_SIZE + 1) * (INPUT_SIZE / 2 - C3_KERNEL_SIZE + 1)];
+    float s4_output[C3_FILTERS * (INPUT_SIZE / 4 - C3_KERNEL_SIZE / 2) * (INPUT_SIZE / 4 - C3_KERNEL_SIZE / 2)];
+    float c5_output[C5_UNITS];
+    float f6_output[F6_UNITS];
+    float final_output[OUTPUT_UNITS];
+
+    // Training loop
+    for (int epoch = 0; epoch < EPOCHS; epoch++) {
+        for (int i = 0; i < local_batch_size; i++) {
+            // Prepare input and target vectors
+            float input[INPUT_SIZE * INPUT_SIZE];
+            for (int j = 0; j < MNIST_IMAGE_SIZE * MNIST_IMAGE_SIZE; j++) {
+                input[j] = local_images[i * MNIST_IMAGE_SIZE * MNIST_IMAGE_SIZE + j] / 255.0f;
+            }
+            
+            // One-hot encode the target label
+            float target[OUTPUT_UNITS] = {0};
+            target[local_labels[i]] = 1.0f;
+            
+            // Train on the current image
+            train(input, target, c1_filters, c3_filters, c5_weights, f6_weights, output_weights, 
+                  c1_output, s2_output, c3_output, s4_output, c5_output, f6_output, final_output);
+        }
+        
+        // Reduce gradients across all processes
+        MPI_Bcast(c1_filters, C1_FILTERS * C1_KERNEL_SIZE * C1_KERNEL_SIZE, MPI_FLOAT, 0, MPI_COMM_WORLD);
+        MPI_Bcast(c3_filters, C3_FILTERS * C3_KERNEL_SIZE * C3_KERNEL_SIZE, MPI_FLOAT, 0, MPI_COMM_WORLD);
+        MPI_Bcast(c5_weights, C3_FILTERS * 5 * 5 * C5_UNITS, MPI_FLOAT, 0, MPI_COMM_WORLD);
+        MPI_Bcast(f6_weights, C5_UNITS * F6_UNITS, MPI_FLOAT, 0, MPI_COMM_WORLD);
+        MPI_Bcast(output_weights, F6_UNITS * OUTPUT_UNITS, MPI_FLOAT, 0, MPI_COMM_WORLD);
+        
+        printf("Epoch %d completed by rank %d.\n", epoch + 1, rank);
+    }
+
+    // Finalizing MPI
     MPI_Finalize();
+    
     return 0;
 }
